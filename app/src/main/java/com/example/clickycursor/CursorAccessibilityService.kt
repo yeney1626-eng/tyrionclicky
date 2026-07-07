@@ -21,8 +21,8 @@ class CursorAccessibilityService : AccessibilityService() {
     private var cursorX = 0f
     private var cursorY = 0f
 
-    private val moveStepPerTick = 6f
-    private val tickIntervalMs = 16L
+    private val moveStepPerTick = 14f
+    private val tickIntervalMs = 12L
 
     private val moveHandler = Handler(Looper.getMainLooper())
     private var activeDirX = 0f
