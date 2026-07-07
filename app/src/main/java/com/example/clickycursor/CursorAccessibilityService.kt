@@ -71,10 +71,12 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private val revertImageRunnable = Runnable {
         cursorView.setImageResource(R.drawable.cursor_dog_idle)
+        updateOverlayPosition()
     }
 
     private fun showClickFeedback() {
         cursorView.setImageResource(R.drawable.cursor_dog_click)
+        updateOverlayPosition()
         clickHandler.removeCallbacks(revertImageRunnable)
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
@@ -134,19 +136,24 @@ class CursorAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = cursorX.toInt()
-            y = cursorY.toInt()
         }
 
         windowManager.addView(cursorView, params)
+        updateOverlayPosition()
+    }
+
+    private fun updateOverlayPosition() {
+        val halfW = (cursorView.drawable?.intrinsicWidth ?: 0) / 2
+        val halfH = (cursorView.drawable?.intrinsicHeight ?: 0) / 2
+        params.x = (cursorX - halfW).toInt()
+        params.y = (cursorY - halfH).toInt()
+        windowManager.updateViewLayout(cursorView, params)
     }
 
     private fun moveCursorBy(dx: Float, dy: Float) {
         cursorX = (cursorX + dx).coerceIn(0f, screenWidth.toFloat())
         cursorY = (cursorY + dy).coerceIn(0f, screenHeight.toFloat())
-        params.x = cursorX.toInt()
-        params.y = cursorY.toInt()
-        windowManager.updateViewLayout(cursorView, params)
+        updateOverlayPosition()
     }
 
     private fun checkEdgeScroll() {
