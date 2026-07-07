@@ -35,11 +35,23 @@ class CursorAccessibilityService : AccessibilityService() {
     private val edgeScrollDurationMs = 300L
 
     private val clickHandler = Handler(Looper.getMainLooper())
+
+    private val longPressThresholdMs = 400L
+    private val longPressGestureDurationMs = 700L
+    private var longPressFired = false
+
+    private val autoClickStartDelayMs = 500L
     private var autoClickActive = false
     private var autoClickIntervalMs = 500L
     private val autoClickMinIntervalMs = 90L
     private val autoClickAccelStep = 45L
-    private val autoClickStartDelayMs = 450L
+
+    private val longPressRunnable = Runnable {
+        longPressFired = true
+        performLongPressAt(cursorX, cursorY)
+        showClickFeedback()
+        clickHandler.postDelayed(autoClickStartRunnable, autoClickStartDelayMs)
+    }
 
     private val autoClickRunnable = object : Runnable {
         override fun run() {
@@ -202,6 +214,12 @@ class CursorAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
+    private fun performLongPressAt(x: Float, y: Float) {
+        val path = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(path, 0, longPressGestureDurationMs)
+        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+    }
+
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (pointerPaused) return super.onKeyEvent(event)
 
@@ -234,15 +252,19 @@ class CursorAccessibilityService : AccessibilityService() {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    performClickAt(cursorX, cursorY, longClick = false)
-                    showClickFeedback()
-                    clickHandler.postDelayed(autoClickStartRunnable, autoClickStartDelayMs)
+                    longPressFired = false
+                    clickHandler.postDelayed(longPressRunnable, longPressThresholdMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
+                clickHandler.removeCallbacks(longPressRunnable)
                 clickHandler.removeCallbacks(autoClickStartRunnable)
                 clickHandler.removeCallbacks(autoClickRunnable)
                 autoClickActive = false
+                if (!longPressFired) {
+                    performClickAt(cursorX, cursorY, longClick = false)
+                    showClickFeedback()
+                }
             }
         }
     }
