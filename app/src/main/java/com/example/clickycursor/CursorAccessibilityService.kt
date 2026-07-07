@@ -2,8 +2,10 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -11,6 +13,7 @@ import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.ImageView
+import android.widget.Toast
 
 class CursorAccessibilityService : AccessibilityService() {
 
@@ -21,7 +24,7 @@ class CursorAccessibilityService : AccessibilityService() {
     private var cursorX = 0f
     private var cursorY = 0f
 
-    private val moveStepPerTick = 14f
+    private val moveStepPerTick = 7f
     private val tickIntervalMs = 12L
 
     private val moveHandler = Handler(Looper.getMainLooper())
@@ -45,6 +48,9 @@ class CursorAccessibilityService : AccessibilityService() {
     private var autoClickIntervalMs = 500L
     private val autoClickMinIntervalMs = 90L
     private val autoClickAccelStep = 45L
+
+    private val screenshotClickTimestamps = mutableListOf<Long>()
+    private val tripleClickWindowMs = 600L
 
     private val longPressRunnable = Runnable {
         longPressFired = true
@@ -227,6 +233,38 @@ class CursorAccessibilityService : AccessibilityService() {
         dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
+    private fun openMessenger() {
+        val launchIntent = packageManager.getLaunchIntentForPackage("com.facebook.orca")
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(launchIntent)
+        } else {
+            Toast.makeText(this, "Messenger app not found on this device", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun registerClickForTripleTapScreenshot() {
+        val now = System.currentTimeMillis()
+        screenshotClickTimestamps.add(now)
+        while (screenshotClickTimestamps.isNotEmpty() &&
+            now - screenshotClickTimestamps.first() > tripleClickWindowMs
+        ) {
+            screenshotClickTimestamps.removeAt(0)
+        }
+        if (screenshotClickTimestamps.size >= 3) {
+            screenshotClickTimestamps.clear()
+            takeScreenshot()
+        }
+    }
+
+    private fun takeScreenshot() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+        } else {
+            Toast.makeText(this, "Screenshot shortcut needs Android 9+", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (pointerPaused) return super.onKeyEvent(event)
 
@@ -238,7 +276,18 @@ class CursorAccessibilityService : AccessibilityService() {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                 handleClickKey(event); true
             }
-            else -> super.onKeyEvent(event)
+            KeyEvent.KEYCODE_SEARCH -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    openMessenger()
+                }
+                true
+            }
+            else -> {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    Toast.makeText(this, "Key pressed: code ${event.keyCode}", Toast.LENGTH_SHORT).show()
+                }
+                super.onKeyEvent(event)
+            }
         }
     }
 
@@ -271,6 +320,7 @@ class CursorAccessibilityService : AccessibilityService() {
                 if (!longPressFired) {
                     performClickAt(cursorX, cursorY, longClick = false)
                     showClickFeedback()
+                    registerClickForTripleTapScreenshot()
                 }
             }
         }
