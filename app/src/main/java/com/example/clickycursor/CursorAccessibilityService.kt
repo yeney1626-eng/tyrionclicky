@@ -12,34 +12,48 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.ImageView
 
-/**
- * Draws an on-screen pointer and lets the hardware D-pad move it.
- * Center/OK key = tap. Long-press center = long-click (drag-friendly).
- *
- * This mirrors what "Clicky: Mouse Cursor" does on keypad Android phones
- * like the Duoqin/Qin F22 Pro: an AccessibilityService with
- * flagRequestFilterKeyEvents so it can intercept the D-pad before apps see it,
- * plus dispatchGesture() to turn cursor position into an actual tap.
- */
 class CursorAccessibilityService : AccessibilityService() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var cursorView: ImageView
     private lateinit var params: WindowManager.LayoutParams
 
-    // Cursor position in raw pixels, top-left origin.
     private var cursorX = 0f
     private var cursorY = 0f
 
-    // How far one D-pad press moves the cursor. Increases the longer a key is held.
-    private val baseStep = 14f
-    private var currentStep = baseStep
+    private val moveStepPerTick = 6f
+    private val tickIntervalMs = 16L
 
-    // Screen bounds, filled in once the overlay is attached.
+    private val moveHandler = Handler(Looper.getMainLooper())
+    private var activeDirX = 0f
+    private var activeDirY = 0f
+    private var isMoving = false
+
+    private val moveRunnable = object : Runnable {
+        override fun run() {
+            if (!isMoving) return
+            moveCursorBy(activeDirX * moveStepPerTick, activeDirY * moveStepPerTick)
+            moveHandler.postDelayed(this, tickIntervalMs)
+        }
+    }
+
+    private fun startMoving(dirX: Float, dirY: Float) {
+        activeDirX = dirX
+        activeDirY = dirY
+        if (!isMoving) {
+            isMoving = true
+            moveHandler.post(moveRunnable)
+        }
+    }
+
+    private fun stopMoving() {
+        isMoving = false
+        moveHandler.removeCallbacks(moveRunnable)
+    }
+
     private var screenWidth = 0
     private var screenHeight = 0
 
-    // Set to true while a soft keyboard (IME) is on screen, so we don't fight with typing.
     private var pointerPaused = false
 
     private val longPressHandler = Handler(Looper.getMainLooper())
@@ -63,7 +77,7 @@ class CursorAccessibilityService : AccessibilityService() {
         cursorY = screenHeight / 2f
 
         cursorView = ImageView(this).apply {
-            setImageResource(R.drawable.cursor_arrow)
+            setImageResource(R.drawable.cursor_dot)
         }
 
         params = WindowManager.LayoutParams(
@@ -99,8 +113,6 @@ class CursorAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
-    // --- Hardware key interception -------------------------------------------------
-
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (pointerPaused) return super.onKeyEvent(event)
 
@@ -117,11 +129,16 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleDirection(event: KeyEvent, dirX: Float, dirY: Float) {
-        if (event.action != KeyEvent.ACTION_DOWN) return
-
-        // The longer the key is held, the faster the cursor moves.
-        currentStep = (baseStep + event.repeatCount * 4f).coerceAtMost(baseStep * 6)
-        moveCursorBy(dirX * currentStep, dirY * currentStep)
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    startMoving(dirX, dirY)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                stopMoving()
+            }
+        }
     }
 
     private fun handleClickKey(event: KeyEvent) {
@@ -141,8 +158,6 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    // --- Pause the pointer while a soft keyboard is showing -------------------------
-
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
@@ -159,6 +174,7 @@ class CursorAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopMoving()
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
         }
