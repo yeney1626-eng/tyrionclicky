@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClickyCursor</string>
+    <string name="service_description">Draws an on-screen pointer and lets you move it with the D-pad keys and click with the center key. Needed to control the cursor on your device.</string>
+</resources>
