@@ -11,7 +11,6 @@ import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.ImageView
-import android.widget.Toast
 
 class CursorAccessibilityService : AccessibilityService() {
 
@@ -30,10 +29,17 @@ class CursorAccessibilityService : AccessibilityService() {
     private var activeDirY = 0f
     private var isMoving = false
 
+    // --- Edge scrolling ---
+    private var lastEdgeScrollTime = 0L
+    private val edgeScrollIntervalMs = 400L
+    private val edgeScrollDistance = 500f
+    private val edgeScrollDurationMs = 250L
+
     private val moveRunnable = object : Runnable {
         override fun run() {
             if (!isMoving) return
             moveCursorBy(activeDirX * moveStepPerTick, activeDirY * moveStepPerTick)
+            checkEdgeScroll()
             moveHandler.postDelayed(this, tickIntervalMs)
         }
     }
@@ -104,6 +110,63 @@ class CursorAccessibilityService : AccessibilityService() {
         params.x = cursorX.toInt()
         params.y = cursorY.toInt()
         windowManager.updateViewLayout(cursorView, params)
+    }
+
+    private fun checkEdgeScroll() {
+        val now = System.currentTimeMillis()
+        if (now - lastEdgeScrollTime < edgeScrollIntervalMs) return
+
+        var triggered = false
+
+        if (activeDirY < 0 && cursorY <= 0f) {
+            scrollVertical(scrollDown = false)
+            triggered = true
+        } else if (activeDirY > 0 && cursorY >= screenHeight.toFloat()) {
+            scrollVertical(scrollDown = true)
+            triggered = true
+        }
+
+        if (activeDirX < 0 && cursorX <= 0f) {
+            scrollHorizontal(scrollRight = false)
+            triggered = true
+        } else if (activeDirX > 0 && cursorX >= screenWidth.toFloat()) {
+            scrollHorizontal(scrollRight = true)
+            triggered = true
+        }
+
+        if (triggered) lastEdgeScrollTime = now
+    }
+
+    private fun scrollVertical(scrollDown: Boolean) {
+        val centerX = screenWidth / 2f
+        val startY = if (scrollDown) screenHeight * 0.7f else screenHeight * 0.3f
+        val endY = if (scrollDown) {
+            (startY - edgeScrollDistance).coerceAtLeast(0f)
+        } else {
+            (startY + edgeScrollDistance).coerceAtMost(screenHeight.toFloat())
+        }
+        val path = Path().apply {
+            moveTo(centerX, startY)
+            lineTo(centerX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, edgeScrollDurationMs)
+        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+    }
+
+    private fun scrollHorizontal(scrollRight: Boolean) {
+        val centerY = screenHeight / 2f
+        val startX = if (scrollRight) screenWidth * 0.7f else screenWidth * 0.3f
+        val endX = if (scrollRight) {
+            (startX - edgeScrollDistance).coerceAtLeast(0f)
+        } else {
+            (startX + edgeScrollDistance).coerceAtMost(screenWidth.toFloat())
+        }
+        val path = Path().apply {
+            moveTo(startX, centerY)
+            lineTo(endX, centerY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, edgeScrollDurationMs)
+        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
     private fun performClickAt(x: Float, y: Float, longClick: Boolean) {
