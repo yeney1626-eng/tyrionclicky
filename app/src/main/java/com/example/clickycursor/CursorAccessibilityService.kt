@@ -49,9 +49,6 @@ class CursorAccessibilityService : AccessibilityService() {
     private val autoClickMinIntervalMs = 90L
     private val autoClickAccelStep = 45L
 
-    private val screenshotClickTimestamps = mutableListOf<Long>()
-    private val tripleClickWindowMs = 600L
-
     private val longPressRunnable = Runnable {
         longPressFired = true
         performLongPressAt(cursorX, cursorY)
@@ -243,20 +240,6 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun registerClickForTripleTapScreenshot() {
-        val now = System.currentTimeMillis()
-        screenshotClickTimestamps.add(now)
-        while (screenshotClickTimestamps.isNotEmpty() &&
-            now - screenshotClickTimestamps.first() > tripleClickWindowMs
-        ) {
-            screenshotClickTimestamps.removeAt(0)
-        }
-        if (screenshotClickTimestamps.size >= 3) {
-            screenshotClickTimestamps.clear()
-            takeScreenshot()
-        }
-    }
-
     private fun takeScreenshot() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
@@ -278,7 +261,7 @@ class CursorAccessibilityService : AccessibilityService() {
             }
             KeyEvent.KEYCODE_SEARCH -> {
                 if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    openMessenger()
+                    takeScreenshot()
                 }
                 true
             }
@@ -320,7 +303,6 @@ class CursorAccessibilityService : AccessibilityService() {
                 if (!longPressFired) {
                     performClickAt(cursorX, cursorY, longClick = false)
                     showClickFeedback()
-                    registerClickForTripleTapScreenshot()
                 }
             }
         }
