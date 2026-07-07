@@ -29,11 +29,43 @@ class CursorAccessibilityService : AccessibilityService() {
     private var activeDirY = 0f
     private var isMoving = false
 
-    // --- Edge scrolling ---
     private var lastEdgeScrollTime = 0L
-    private val edgeScrollIntervalMs = 400L
-    private val edgeScrollDistance = 500f
-    private val edgeScrollDurationMs = 250L
+    private val edgeScrollIntervalMs = 650L
+    private val edgeScrollDistance = 380f
+    private val edgeScrollDurationMs = 300L
+
+    private val clickHandler = Handler(Looper.getMainLooper())
+    private var autoClickActive = false
+    private var autoClickIntervalMs = 500L
+    private val autoClickMinIntervalMs = 90L
+    private val autoClickAccelStep = 45L
+    private val autoClickStartDelayMs = 450L
+
+    private val autoClickRunnable = object : Runnable {
+        override fun run() {
+            if (!autoClickActive) return
+            performClickAt(cursorX, cursorY, longClick = false)
+            showClickFeedback()
+            autoClickIntervalMs = (autoClickIntervalMs - autoClickAccelStep).coerceAtLeast(autoClickMinIntervalMs)
+            clickHandler.postDelayed(this, autoClickIntervalMs)
+        }
+    }
+
+    private val autoClickStartRunnable = Runnable {
+        autoClickActive = true
+        autoClickIntervalMs = 500L
+        clickHandler.post(autoClickRunnable)
+    }
+
+    private val revertImageRunnable = Runnable {
+        cursorView.setImageResource(R.drawable.cursor_dog_idle)
+    }
+
+    private fun showClickFeedback() {
+        cursorView.setImageResource(R.drawable.cursor_dog_click)
+        clickHandler.removeCallbacks(revertImageRunnable)
+        clickHandler.postDelayed(revertImageRunnable, 180)
+    }
 
     private val moveRunnable = object : Runnable {
         override fun run() {
@@ -63,13 +95,6 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private var pointerPaused = false
 
-    private val longPressHandler = Handler(Looper.getMainLooper())
-    private var longPressTriggered = false
-    private val longPressRunnable = Runnable {
-        longPressTriggered = true
-        performClickAt(cursorX, cursorY, longClick = true)
-    }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -84,7 +109,7 @@ class CursorAccessibilityService : AccessibilityService() {
         cursorY = screenHeight / 2f
 
         cursorView = ImageView(this).apply {
-            setImageResource(R.drawable.cursor_dot)
+            setImageResource(R.drawable.cursor_dog_idle)
         }
 
         params = WindowManager.LayoutParams(
@@ -209,15 +234,15 @@ class CursorAccessibilityService : AccessibilityService() {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    longPressTriggered = false
-                    longPressHandler.postDelayed(longPressRunnable, 500)
+                    performClickAt(cursorX, cursorY, longClick = false)
+                    showClickFeedback()
+                    clickHandler.postDelayed(autoClickStartRunnable, autoClickStartDelayMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
-                longPressHandler.removeCallbacks(longPressRunnable)
-                if (!longPressTriggered) {
-                    performClickAt(cursorX, cursorY, longClick = false)
-                }
+                clickHandler.removeCallbacks(autoClickStartRunnable)
+                clickHandler.removeCallbacks(autoClickRunnable)
+                autoClickActive = false
             }
         }
     }
@@ -239,6 +264,7 @@ class CursorAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         stopMoving()
+        clickHandler.removeCallbacksAndMessages(null)
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
         }
