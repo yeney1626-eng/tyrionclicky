@@ -2,6 +2,7 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.res.Configuration
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Build
@@ -45,33 +46,24 @@ class CursorAccessibilityService : AccessibilityService() {
     private val longPressGestureDurationMs = 700L
     private var longPressFired = false
 
-    private val autoClickStartDelayMs = 500L
-    private var autoClickActive = false
-    private var autoClickIntervalMs = 500L
-    private val autoClickMinIntervalMs = 90L
-    private val autoClickAccelStep = 45L
+    private val dragStartDelayMs = 400L
+    private var dragActive = false
+    private var dragLastX = 0f
+    private var dragLastY = 0f
+    private var lastDragDispatchTime = 0L
+    private val dragThrottleMs = 60L
+
+    private val dragStartRunnable = Runnable {
+        dragActive = true
+        dragLastX = cursorX
+        dragLastY = cursorY
+    }
 
     private val longPressRunnable = Runnable {
         longPressFired = true
         performLongPressAt(cursorX, cursorY)
         showClickFeedback()
-        clickHandler.postDelayed(autoClickStartRunnable, autoClickStartDelayMs)
-    }
-
-    private val autoClickRunnable = object : Runnable {
-        override fun run() {
-            if (!autoClickActive) return
-            performClickAt(cursorX, cursorY, longClick = false)
-            showClickFeedback()
-            autoClickIntervalMs = (autoClickIntervalMs - autoClickAccelStep).coerceAtLeast(autoClickMinIntervalMs)
-            clickHandler.postDelayed(this, autoClickIntervalMs)
-        }
-    }
-
-    private val autoClickStartRunnable = Runnable {
-        autoClickActive = true
-        autoClickIntervalMs = 500L
-        clickHandler.post(autoClickRunnable)
+        clickHandler.postDelayed(dragStartRunnable, dragStartDelayMs)
     }
 
     private val revertImageRunnable = Runnable {
@@ -93,21 +85,17 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private val backspaceHandler = Handler(Looper.getMainLooper())
-    private var backspaceHeld = false
-    private val backspaceRepeatDelayMs = 400L
+    private var lastBackTapTime = 0L
+    private val backDoubleTapWindowMs = 350L
+    private var rapidDeleteActive = false
     private val backspaceRepeatIntervalMs = 140L
 
-    private val backspaceRepeatRunnable = object : Runnable {
+    private val rapidDeleteRunnable = object : Runnable {
         override fun run() {
-            if (!backspaceHeld) return
+            if (!rapidDeleteActive) return
             performBackspace()
             backspaceHandler.postDelayed(this, backspaceRepeatIntervalMs)
         }
-    }
-
-    private val backspaceStartRepeatRunnable = Runnable {
-        backspaceHeld = true
-        backspaceHandler.post(backspaceRepeatRunnable)
     }
 
     private val starLongPressRunnable = Runnable { openEmojiPanel() }
@@ -199,6 +187,25 @@ class CursorAccessibilityService : AccessibilityService() {
         cursorX = (cursorX + dx).coerceIn(0f, screenWidth.toFloat())
         cursorY = (cursorY + dy).coerceIn(0f, screenHeight.toFloat())
         updateOverlayPosition()
+
+        if (dragActive) {
+            val now = System.currentTimeMillis()
+            if (now - lastDragDispatchTime >= dragThrottleMs) {
+                performDragSegment(dragLastX, dragLastY, cursorX, cursorY)
+                dragLastX = cursorX
+                dragLastY = cursorY
+                lastDragDispatchTime = now
+            }
+        }
+    }
+
+    private fun performDragSegment(fromX: Float, fromY: Float, toX: Float, toY: Float) {
+        val path = Path().apply {
+            moveTo(fromX, fromY)
+            lineTo(toX, toY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, dragThrottleMs)
+        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
     private fun checkEdgeScroll() {
@@ -281,6 +288,8 @@ class CursorAccessibilityService : AccessibilityService() {
     private fun performBackspace() {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
         try {
+            val isHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText
+            if (isHint) return
             val text = node.text?.toString() ?: return
             if (text.isEmpty()) return
             val newText = text.substring(0, text.length - 1)
@@ -299,7 +308,8 @@ class CursorAccessibilityService : AccessibilityService() {
     private fun insertTextAtFocus(extra: String) {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
         try {
-            val current = node.text?.toString() ?: ""
+            val isHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText
+            val current = if (isHint) "" else (node.text?.toString() ?: "")
             val newText = current + extra
             val arguments = Bundle()
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
@@ -486,9 +496,8 @@ class CursorAccessibilityService : AccessibilityService() {
             }
             KeyEvent.ACTION_UP -> {
                 clickHandler.removeCallbacks(longPressRunnable)
-                clickHandler.removeCallbacks(autoClickStartRunnable)
-                clickHandler.removeCallbacks(autoClickRunnable)
-                autoClickActive = false
+                clickHandler.removeCallbacks(dragStartRunnable)
+                dragActive = false
                 if (!longPressFired) {
                     performClickAt(cursorX, cursorY, longClick = false)
                     showClickFeedback()
@@ -515,19 +524,23 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleBackspaceKey(event: KeyEvent) {
-        when (event.action) {
-            KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount == 0) {
-                    performBackspace()
-                    backspaceHandler.postDelayed(backspaceStartRepeatRunnable, backspaceRepeatDelayMs)
-                }
-            }
-            KeyEvent.ACTION_UP -> {
-                backspaceHandler.removeCallbacks(backspaceStartRepeatRunnable)
-                backspaceHandler.removeCallbacks(backspaceRepeatRunnable)
-                backspaceHeld = false
-            }
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return
+        val now = System.currentTimeMillis()
+
+        if (rapidDeleteActive) {
+            rapidDeleteActive = false
+            backspaceHandler.removeCallbacks(rapidDeleteRunnable)
+            lastBackTapTime = now
+            return
         }
+
+        if (now - lastBackTapTime <= backDoubleTapWindowMs) {
+            rapidDeleteActive = true
+            backspaceHandler.post(rapidDeleteRunnable)
+        } else {
+            performBackspace()
+        }
+        lastBackTapTime = now
     }
 
     private fun handleStarKey(event: KeyEvent) {
@@ -556,6 +569,22 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!::windowManager.isInitialized) return
+
+        val oldWidth = screenWidth
+        val oldHeight = screenHeight
+        val metrics = resources.displayMetrics
+        screenWidth = metrics.widthPixels
+        screenHeight = metrics.heightPixels
+
+        cursorX = if (oldWidth > 0) (cursorX / oldWidth * screenWidth) else screenWidth / 2f
+        cursorY = if (oldHeight > 0) (cursorY / oldHeight * screenHeight) else screenHeight / 2f
+
+        if (::cursorView.isInitialized) updateOverlayPosition()
+    }
 
     override fun onDestroy() {
         super.onDestroy()
