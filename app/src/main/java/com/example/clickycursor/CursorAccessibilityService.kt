@@ -312,20 +312,13 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val emojiWindowSize = 7
+
     private fun buildEmojiPanel() {
         emojiPanelView = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(0xDD222222.toInt())
             setPadding(20, 14, 20, 14)
-        }
-        emojiList.forEach { e ->
-            val tv = TextView(this).apply {
-                text = e
-                textSize = 20f
-                setPadding(10, 6, 10, 6)
-            }
-            emojiTextViews.add(tv)
-            emojiPanelView.addView(tv)
         }
         emojiPanelParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -341,9 +334,41 @@ class CursorAccessibilityService : AccessibilityService() {
         emojiPanelInitialized = true
     }
 
-    private fun updateEmojiHighlight() {
-        emojiTextViews.forEachIndexed { i, tv ->
-            tv.setBackgroundColor(if (i == emojiSelectedIndex) 0xFFFFFFFF.toInt() else 0x00000000)
+    private fun refreshEmojiPanelViews() {
+        emojiPanelView.removeAllViews()
+        emojiTextViews.clear()
+
+        val size = emojiList.size
+        val windowSize = emojiWindowSize.coerceAtMost(size)
+        var start = emojiSelectedIndex - windowSize / 2
+        start = start.coerceIn(0, (size - windowSize).coerceAtLeast(0))
+        val end = start + windowSize
+
+        if (start > 0) {
+            emojiPanelView.addView(TextView(this).apply {
+                text = "\u2039"
+                textSize = 16f
+                setPadding(6, 6, 6, 6)
+            })
+        }
+
+        for (i in start until end) {
+            val tv = TextView(this).apply {
+                text = emojiList[i]
+                textSize = 20f
+                setPadding(10, 6, 10, 6)
+                setBackgroundColor(if (i == emojiSelectedIndex) 0xFFFFFFFF.toInt() else 0x00000000)
+            }
+            emojiTextViews.add(tv)
+            emojiPanelView.addView(tv)
+        }
+
+        if (end < size) {
+            emojiPanelView.addView(TextView(this).apply {
+                text = "\u203A"
+                textSize = 16f
+                setPadding(6, 6, 6, 6)
+            })
         }
     }
 
@@ -351,7 +376,7 @@ class CursorAccessibilityService : AccessibilityService() {
         if (!emojiPanelInitialized) buildEmojiPanel()
         stopMoving()
         emojiSelectedIndex = 0
-        updateEmojiHighlight()
+        refreshEmojiPanelViews()
         if (!emojiPanelOpen) {
             windowManager.addView(emojiPanelView, emojiPanelParams)
             emojiPanelOpen = true
@@ -368,7 +393,7 @@ class CursorAccessibilityService : AccessibilityService() {
     private fun moveEmojiSelection(delta: Int) {
         val size = emojiList.size
         emojiSelectedIndex = ((emojiSelectedIndex + delta) % size + size) % size
-        updateEmojiHighlight()
+        refreshEmojiPanelViews()
     }
 
     private fun insertSelectedEmoji() {
@@ -377,26 +402,31 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
-        if (pointerPaused) return super.onKeyEvent(event)
-
         if (emojiPanelOpen) {
             return handleEmojiPanelKeyEvent(event)
         }
 
         return when (event.keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> { handleDirection(event, 0f, -1f); true }
-            KeyEvent.KEYCODE_DPAD_DOWN -> { handleDirection(event, 0f, 1f); true }
-            KeyEvent.KEYCODE_DPAD_LEFT -> { handleDirection(event, -1f, 0f); true }
-            KeyEvent.KEYCODE_DPAD_RIGHT -> { handleDirection(event, 1f, 0f); true }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (pointerPaused) super.onKeyEvent(event) else { handleDirection(event, 0f, -1f); true }
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (pointerPaused) super.onKeyEvent(event) else { handleDirection(event, 0f, 1f); true }
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (pointerPaused) super.onKeyEvent(event) else { handleDirection(event, -1f, 0f); true }
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (pointerPaused) super.onKeyEvent(event) else { handleDirection(event, 1f, 0f); true }
+            }
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                handleClickKey(event); true
+                if (pointerPaused) super.onKeyEvent(event) else { handleClickKey(event); true }
             }
             KeyEvent.KEYCODE_MENU -> {
                 handleMenuKey(event); true
             }
             KeyEvent.KEYCODE_BACK -> {
-                val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                if (node != null) {
+                if (pointerPaused) {
                     handleBackspaceKey(event)
                     true
                 } else {
@@ -412,15 +442,25 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleEmojiPanelKeyEvent(event: KeyEvent): Boolean {
-        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
-        when (event.keyCode) {
-            KeyEvent.KEYCODE_DPAD_LEFT -> moveEmojiSelection(-1)
-            KeyEvent.KEYCODE_DPAD_RIGHT -> moveEmojiSelection(1)
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> insertSelectedEmoji()
-            KeyEvent.KEYCODE_BACK -> closeEmojiPanel()
-            else -> {}
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) moveEmojiSelection(-1)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) moveEmojiSelection(1)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) insertSelectedEmoji()
+                true
+            }
+            KeyEvent.KEYCODE_BACK -> {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) closeEmojiPanel()
+                true
+            }
+            else -> super.onKeyEvent(event)
         }
-        return true
     }
 
     private fun handleDirection(event: KeyEvent, dirX: Float, dirY: Float) {
