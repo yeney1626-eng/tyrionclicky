@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.Surface
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -297,8 +298,6 @@ class CursorAccessibilityService : AccessibilityService() {
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         } catch (e: Exception) {
-            // Some fields don't support programmatic edits; fail quietly rather than
-            // crashing the service and losing the cursor overlay.
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
@@ -315,7 +314,6 @@ class CursorAccessibilityService : AccessibilityService() {
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         } catch (e: Exception) {
-            // Ignore fields that don't support programmatic edits.
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
@@ -473,11 +471,30 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun getDisplayRotation(): Int {
+        return try {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        } catch (e: Exception) {
+            Surface.ROTATION_0
+        }
+    }
+
+    private fun rotateForDisplay(dx: Float, dy: Float): Pair<Float, Float> {
+        return when (getDisplayRotation()) {
+            Surface.ROTATION_90 -> Pair(dy, -dx)
+            Surface.ROTATION_180 -> Pair(-dx, -dy)
+            Surface.ROTATION_270 -> Pair(-dy, dx)
+            else -> Pair(dx, dy)
+        }
+    }
+
     private fun handleDirection(event: KeyEvent, dirX: Float, dirY: Float) {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    startMoving(dirX, dirY)
+                    val (rdx, rdy) = rotateForDisplay(dirX, dirY)
+                    startMoving(rdx, rdy)
                 }
             }
             KeyEvent.ACTION_UP -> {
