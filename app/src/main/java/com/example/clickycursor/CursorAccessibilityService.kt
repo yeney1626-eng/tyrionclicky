@@ -95,7 +95,7 @@ class CursorAccessibilityService : AccessibilityService() {
     private val backspaceHandler = Handler(Looper.getMainLooper())
     private var backspaceHeld = false
     private val backspaceRepeatDelayMs = 400L
-    private val backspaceRepeatIntervalMs = 80L
+    private val backspaceRepeatIntervalMs = 140L
 
     private val backspaceRepeatRunnable = object : Runnable {
         override fun run() {
@@ -115,7 +115,9 @@ class CursorAccessibilityService : AccessibilityService() {
     private val emojiList = listOf(
         "\uD83D\uDE00", "\uD83D\uDE02", "\uD83D\uDE0D", "\uD83D\uDC4D", "\uD83D\uDE4F",
         "\u2764\uFE0F", "\uD83D\uDE22", "\uD83D\uDE2E", "\uD83D\uDD25", "\uD83C\uDF89",
-        "\uD83D\uDE05", "\uD83E\uDD14", "\uD83D\uDE0E", "\uD83D\uDC4F", "\uD83D\uDCAF", "\uD83D\uDE2D"
+        "\uD83D\uDE05", "\uD83E\uDD14", "\uD83D\uDE0E", "\uD83D\uDC4F", "\uD83D\uDCAF", "\uD83D\uDE2D",
+        "\uD83D\uDE0F", "\uD83D\uDE44", "\uD83E\uDD79", "\uD83C\uDF7B",
+        "\uD83D\uDC4C\uD83C\uDFFC", "\u270C\uD83C\uDFFC", "\uD83D\uDE0A"
     )
     private var emojiPanelOpen = false
     private var emojiSelectedIndex = 0
@@ -278,21 +280,36 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private fun performBackspace() {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
-        val text = node.text?.toString() ?: return
-        if (text.isEmpty()) return
-        val newText = text.substring(0, text.length - 1)
-        val arguments = Bundle()
-        arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
-        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        try {
+            val text = node.text?.toString() ?: return
+            if (text.isEmpty()) return
+            val newText = text.substring(0, text.length - 1)
+            val arguments = Bundle()
+            arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        } catch (e: Exception) {
+            // Some fields don't support programmatic edits; fail quietly rather than
+            // crashing the service and losing the cursor overlay.
+        } finally {
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
+        }
     }
 
     private fun insertTextAtFocus(extra: String) {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
-        val current = node.text?.toString() ?: ""
-        val newText = current + extra
-        val arguments = Bundle()
-        arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
-        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        try {
+            val current = node.text?.toString() ?: ""
+            val newText = current + extra
+            val arguments = Bundle()
+            arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        } catch (e: Exception) {
+            // Ignore fields that don't support programmatic edits.
+        } finally {
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
+        }
     }
 
     private fun buildEmojiPanel() {
@@ -395,7 +412,7 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleEmojiPanelKeyEvent(event: KeyEvent): Boolean {
-        if (event.action != KeyEvent.ACTION_DOWN) return true
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
         when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_LEFT -> moveEmojiSelection(-1)
             KeyEvent.KEYCODE_DPAD_RIGHT -> moveEmojiSelection(1)
