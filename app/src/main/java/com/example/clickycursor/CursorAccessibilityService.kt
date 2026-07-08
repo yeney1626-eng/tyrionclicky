@@ -2,18 +2,20 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ImageView
-import android.widget.Toast
+import android.widget.LinearLayout
+import android.widget.TextView
 
 class CursorAccessibilityService : AccessibilityService() {
 
@@ -83,6 +85,44 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.removeCallbacks(revertImageRunnable)
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
+
+    private var menuLongPressFired = false
+    private val menuLongPressRunnable = Runnable {
+        menuLongPressFired = true
+        takeScreenshot()
+    }
+
+    private val backspaceHandler = Handler(Looper.getMainLooper())
+    private var backspaceHeld = false
+    private val backspaceRepeatDelayMs = 400L
+    private val backspaceRepeatIntervalMs = 80L
+
+    private val backspaceRepeatRunnable = object : Runnable {
+        override fun run() {
+            if (!backspaceHeld) return
+            performBackspace()
+            backspaceHandler.postDelayed(this, backspaceRepeatIntervalMs)
+        }
+    }
+
+    private val backspaceStartRepeatRunnable = Runnable {
+        backspaceHeld = true
+        backspaceHandler.post(backspaceRepeatRunnable)
+    }
+
+    private val starLongPressRunnable = Runnable { openEmojiPanel() }
+
+    private val emojiList = listOf(
+        "\uD83D\uDE00", "\uD83D\uDE02", "\uD83D\uDE0D", "\uD83D\uDC4D", "\uD83D\uDE4F",
+        "\u2764\uFE0F", "\uD83D\uDE22", "\uD83D\uDE2E", "\uD83D\uDD25", "\uD83C\uDF89",
+        "\uD83D\uDE05", "\uD83E\uDD14", "\uD83D\uDE0E", "\uD83D\uDC4F", "\uD83D\uDCAF", "\uD83D\uDE2D"
+    )
+    private var emojiPanelOpen = false
+    private var emojiSelectedIndex = 0
+    private var emojiPanelInitialized = false
+    private lateinit var emojiPanelView: LinearLayout
+    private lateinit var emojiPanelParams: WindowManager.LayoutParams
+    private val emojiTextViews = mutableListOf<TextView>()
 
     private val moveRunnable = object : Runnable {
         override fun run() {
@@ -230,26 +270,101 @@ class CursorAccessibilityService : AccessibilityService() {
         dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
-    private fun openMessenger() {
-        val launchIntent = packageManager.getLaunchIntentForPackage("com.facebook.orca")
-        if (launchIntent != null) {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(launchIntent)
-        } else {
-            Toast.makeText(this, "Messenger app not found on this device", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun takeScreenshot() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
-        } else {
-            Toast.makeText(this, "Screenshot shortcut needs Android 9+", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun performBackspace() {
+        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+        val text = node.text?.toString() ?: return
+        if (text.isEmpty()) return
+        val newText = text.substring(0, text.length - 1)
+        val arguments = Bundle()
+        arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+    }
+
+    private fun insertTextAtFocus(extra: String) {
+        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+        val current = node.text?.toString() ?: ""
+        val newText = current + extra
+        val arguments = Bundle()
+        arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+    }
+
+    private fun buildEmojiPanel() {
+        emojiPanelView = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0xDD222222.toInt())
+            setPadding(20, 14, 20, 14)
+        }
+        emojiList.forEach { e ->
+            val tv = TextView(this).apply {
+                text = e
+                textSize = 20f
+                setPadding(10, 6, 10, 6)
+            }
+            emojiTextViews.add(tv)
+            emojiPanelView.addView(tv)
+        }
+        emojiPanelParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = 140
+        }
+        emojiPanelInitialized = true
+    }
+
+    private fun updateEmojiHighlight() {
+        emojiTextViews.forEachIndexed { i, tv ->
+            tv.setBackgroundColor(if (i == emojiSelectedIndex) 0xFFFFFFFF.toInt() else 0x00000000)
+        }
+    }
+
+    private fun openEmojiPanel() {
+        if (!emojiPanelInitialized) buildEmojiPanel()
+        stopMoving()
+        emojiSelectedIndex = 0
+        updateEmojiHighlight()
+        if (!emojiPanelOpen) {
+            windowManager.addView(emojiPanelView, emojiPanelParams)
+            emojiPanelOpen = true
+        }
+    }
+
+    private fun closeEmojiPanel() {
+        if (emojiPanelOpen) {
+            windowManager.removeView(emojiPanelView)
+            emojiPanelOpen = false
+        }
+    }
+
+    private fun moveEmojiSelection(delta: Int) {
+        val size = emojiList.size
+        emojiSelectedIndex = ((emojiSelectedIndex + delta) % size + size) % size
+        updateEmojiHighlight()
+    }
+
+    private fun insertSelectedEmoji() {
+        insertTextAtFocus(emojiList[emojiSelectedIndex])
+        closeEmojiPanel()
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (pointerPaused) return super.onKeyEvent(event)
+
+        if (emojiPanelOpen) {
+            return handleEmojiPanelKeyEvent(event)
+        }
 
         return when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> { handleDirection(event, 0f, -1f); true }
@@ -259,19 +374,36 @@ class CursorAccessibilityService : AccessibilityService() {
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                 handleClickKey(event); true
             }
-            KeyEvent.KEYCODE_SEARCH -> {
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    takeScreenshot()
-                }
-                true
+            KeyEvent.KEYCODE_MENU -> {
+                handleMenuKey(event); true
             }
-            else -> {
-                if (event.action == KeyEvent.ACTION_DOWN) {
-                    Toast.makeText(this, "Key pressed: code ${event.keyCode}", Toast.LENGTH_SHORT).show()
+            KeyEvent.KEYCODE_BACK -> {
+                val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                if (node != null) {
+                    handleBackspaceKey(event)
+                    true
+                } else {
+                    super.onKeyEvent(event)
                 }
+            }
+            KeyEvent.KEYCODE_STAR -> {
+                handleStarKey(event)
                 super.onKeyEvent(event)
             }
+            else -> super.onKeyEvent(event)
         }
+    }
+
+    private fun handleEmojiPanelKeyEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) return true
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> moveEmojiSelection(-1)
+            KeyEvent.KEYCODE_DPAD_RIGHT -> moveEmojiSelection(1)
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> insertSelectedEmoji()
+            KeyEvent.KEYCODE_BACK -> closeEmojiPanel()
+            else -> {}
+        }
+        return true
     }
 
     private fun handleDirection(event: KeyEvent, dirX: Float, dirY: Float) {
@@ -308,6 +440,52 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun handleMenuKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    menuLongPressFired = false
+                    clickHandler.postDelayed(menuLongPressRunnable, longPressThresholdMs)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                clickHandler.removeCallbacks(menuLongPressRunnable)
+                if (!menuLongPressFired) {
+                    performGlobalAction(GLOBAL_ACTION_RECENTS)
+                }
+            }
+        }
+    }
+
+    private fun handleBackspaceKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    performBackspace()
+                    backspaceHandler.postDelayed(backspaceStartRepeatRunnable, backspaceRepeatDelayMs)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                backspaceHandler.removeCallbacks(backspaceStartRepeatRunnable)
+                backspaceHandler.removeCallbacks(backspaceRepeatRunnable)
+                backspaceHeld = false
+            }
+        }
+    }
+
+    private fun handleStarKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    clickHandler.postDelayed(starLongPressRunnable, longPressThresholdMs)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                clickHandler.removeCallbacks(starLongPressRunnable)
+            }
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
@@ -326,8 +504,12 @@ class CursorAccessibilityService : AccessibilityService() {
         super.onDestroy()
         stopMoving()
         clickHandler.removeCallbacksAndMessages(null)
+        backspaceHandler.removeCallbacksAndMessages(null)
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
+        }
+        if (emojiPanelOpen && ::emojiPanelView.isInitialized) {
+            windowManager.removeView(emojiPanelView)
         }
     }
 }
