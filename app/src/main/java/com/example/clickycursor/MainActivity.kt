@@ -2,6 +2,7 @@ package com.example.clickycursor
 
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
@@ -47,5 +48,31 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
+
+        val btnBrightness = findViewById<Button>(R.id.btnGrantBrightness)
+        val tvBrightnessStatus = findViewById<TextView>(R.id.tvBrightnessStatus)
+        updateBrightnessStatus(tvBrightnessStatus)
+        btnBrightness.setOnClickListener {
+            if (!Settings.System.canWrite(this)) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateBrightnessStatus(findViewById(R.id.tvBrightnessStatus))
+    }
+
+    private fun updateBrightnessStatus(tv: TextView) {
+        tv.text = if (Settings.System.canWrite(this)) {
+            "Brightness permission: granted"
+        } else {
+            "Brightness permission: not granted (needed for keys 4/6)"
+        }
     }
 }
