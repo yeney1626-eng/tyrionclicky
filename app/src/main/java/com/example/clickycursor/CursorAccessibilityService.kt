@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.Surface
@@ -44,6 +45,7 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private val clickHandler = Handler(Looper.getMainLooper())
 
+    // --- Center/OK key: tap / long-press right-click / auto-click on hold ---
     private val longPressThresholdMs = 400L
     private val longPressGestureDurationMs = 700L
     private var longPressFired = false
@@ -80,29 +82,54 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
 
-    private var menuLongPressFired = false
-    private val menuLongPressRunnable = Runnable {
-        menuLongPressFired = true
-        takeScreenshot()
+    // --- Menu key (magnifying glass, keycode 82): tap = delete one char, hold = continuous delete ---
+    private var menuHeld = false
+    private val menuRepeatDelayMs = 400L
+    private val menuRepeatIntervalMs = 140L
+    private val menuRepeatRunnable = object : Runnable {
+        override fun run() {
+            if (!menuHeld) return
+            performBackspace()
+            clickHandler.postDelayed(this, menuRepeatIntervalMs)
+        }
+    }
+    private val menuStartRepeatRunnable = Runnable {
+        menuHeld = true
+        clickHandler.post(menuRepeatRunnable)
     }
 
-    private val backspaceHandler = Handler(Looper.getMainLooper())
-    private var lastBackTapTime = 0L
-    private val backDoubleTapWindowMs = 600L
-    private var rapidDeleteActive = false
-    private val backspaceRepeatIntervalMs = 140L
+    private val brightnessHandler = Handler(Looper.getMainLooper())
+    private var brightnessAdjusting = false
+    private var brightnessDecreasing = true
+    private val brightnessStepDelayMs = 90L
+    private val brightnessStep = 8
+    private val brightnessRunnable = object : Runnable {
+        override fun run() {
+            if (!brightnessAdjusting) return
+            adjustBrightness(if (brightnessDecreasing) -brightnessStep else brightnessStep)
+            brightnessHandler.postDelayed(this, brightnessStepDelayMs)
+        }
+    }
+
+    // Triple-tap the center key quickly = screenshot.
+    private val screenshotClickTimestamps = mutableListOf<Long>()
+    private val tripleClickWindowMs = 600L
+
+    // Reaching the top edge toggles the status bar (once per arrival, not repeated).
+    private var topEdgeActive = false
+    private var statusBarExpanded = false
+
+    // --- Back key: tap = normal Back, hold = Recents ---
+    private var backLongPressFired = false
+    private val backLongPressRunnable = Runnable {
+        backLongPressFired = true
+        performGlobalAction(GLOBAL_ACTION_RECENTS)
+    }
 
     private var lastImeVisibleTime = 0L
     private val imeGracePeriodMs = 1000L
 
-    private val rapidDeleteRunnable = object : Runnable {
-        override fun run() {
-            if (!rapidDeleteActive) return
-            performBackspace()
-            backspaceHandler.postDelayed(this, backspaceRepeatIntervalMs)
-        }
-    }
-
+    // --- Star key long-press: floating emoji picker ---
     private val starLongPressRunnable = Runnable { openEmojiPanel() }
 
     private val emojiList = listOf(
@@ -224,15 +251,22 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     private fun checkEdgeScroll() {
+        // Top edge: toggle the status bar once per arrival, not repeatedly while held.
+        if (activeDirY < 0 && cursorY <= 0f) {
+            if (!topEdgeActive) {
+                toggleStatusBar()
+                topEdgeActive = true
+            }
+        } else if (cursorY > 0f) {
+            topEdgeActive = false
+        }
+
         val now = System.currentTimeMillis()
         if (now - lastEdgeScrollTime < edgeScrollIntervalMs) return
 
         var triggered = false
 
-        if (activeDirY < 0 && cursorY <= 0f) {
-            scrollVertical(scrollDown = false)
-            triggered = true
-        } else if (activeDirY > 0 && cursorY >= screenHeight.toFloat()) {
+        if (activeDirY > 0 && cursorY >= screenHeight.toFloat()) {
             scrollVertical(scrollDown = true)
             triggered = true
         }
@@ -300,6 +334,46 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun registerClickForTripleTapScreenshot() {
+        val now = System.currentTimeMillis()
+        screenshotClickTimestamps.add(now)
+        while (screenshotClickTimestamps.isNotEmpty() &&
+            now - screenshotClickTimestamps.first() > tripleClickWindowMs
+        ) {
+            screenshotClickTimestamps.removeAt(0)
+        }
+        if (screenshotClickTimestamps.size >= 3) {
+            screenshotClickTimestamps.clear()
+            takeScreenshot()
+        }
+    }
+
+    private fun adjustBrightness(delta: Int) {
+        if (!Settings.System.canWrite(this)) return
+        try {
+            Settings.System.putInt(
+                contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS_MODE,
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+            )
+            val current = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+            val newVal = (current + delta).coerceIn(5, 255)
+            Settings.System.putInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, newVal)
+        } catch (e: Exception) {
+            // Permission not granted or setting unavailable; fail quietly.
+        }
+    }
+
+    private fun toggleStatusBar() {
+        if (!statusBarExpanded) {
+            performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+            statusBarExpanded = true
+        } else {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            statusBarExpanded = false
+        }
+    }
+
     private fun performBackspace() {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
         try {
@@ -312,6 +386,8 @@ class CursorAccessibilityService : AccessibilityService() {
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         } catch (e: Exception) {
+            // Some fields don't support programmatic edits; fail quietly rather than
+            // crashing the service and losing the cursor overlay.
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
@@ -328,6 +404,7 @@ class CursorAccessibilityService : AccessibilityService() {
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         } catch (e: Exception) {
+            // Ignore fields that don't support programmatic edits.
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
@@ -448,11 +525,20 @@ class CursorAccessibilityService : AccessibilityService() {
                 handleMenuKey(event); true
             }
             KeyEvent.KEYCODE_BACK -> {
+                handleBackKey(event); true
+            }
+            KeyEvent.KEYCODE_4 -> {
                 if (isTypingContextActive()) {
-                    handleBackspaceKey(event)
-                    true
-                } else {
                     super.onKeyEvent(event)
+                } else {
+                    handleBrightnessKey(event, decrease = true); true
+                }
+            }
+            KeyEvent.KEYCODE_6 -> {
+                if (isTypingContextActive()) {
+                    super.onKeyEvent(event)
+                } else {
+                    handleBrightnessKey(event, decrease = false); true
                 }
             }
             KeyEvent.KEYCODE_STAR -> {
@@ -532,6 +618,7 @@ class CursorAccessibilityService : AccessibilityService() {
                 if (!longPressFired) {
                     performClickAt(cursorX, cursorY, longClick = false)
                     showClickFeedback()
+                    registerClickForTripleTapScreenshot()
                 }
             }
         }
@@ -541,37 +628,50 @@ class CursorAccessibilityService : AccessibilityService() {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    menuLongPressFired = false
-                    clickHandler.postDelayed(menuLongPressRunnable, longPressThresholdMs)
+                    performBackspace()
+                    clickHandler.postDelayed(menuStartRepeatRunnable, menuRepeatDelayMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
-                clickHandler.removeCallbacks(menuLongPressRunnable)
-                if (!menuLongPressFired) {
-                    performGlobalAction(GLOBAL_ACTION_RECENTS)
+                clickHandler.removeCallbacks(menuStartRepeatRunnable)
+                clickHandler.removeCallbacks(menuRepeatRunnable)
+                menuHeld = false
+            }
+        }
+    }
+
+    private fun handleBackKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    backLongPressFired = false
+                    clickHandler.postDelayed(backLongPressRunnable, longPressThresholdMs)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                clickHandler.removeCallbacks(backLongPressRunnable)
+                if (!backLongPressFired) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
                 }
             }
         }
     }
 
-    private fun handleBackspaceKey(event: KeyEvent) {
-        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return
-        val now = System.currentTimeMillis()
-
-        if (rapidDeleteActive) {
-            rapidDeleteActive = false
-            backspaceHandler.removeCallbacks(rapidDeleteRunnable)
-            lastBackTapTime = now
-            return
+    private fun handleBrightnessKey(event: KeyEvent, decrease: Boolean) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    brightnessDecreasing = decrease
+                    adjustBrightness(if (decrease) -brightnessStep else brightnessStep)
+                    brightnessAdjusting = true
+                    brightnessHandler.postDelayed(brightnessRunnable, brightnessStepDelayMs)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                brightnessAdjusting = false
+                brightnessHandler.removeCallbacks(brightnessRunnable)
+            }
         }
-
-        if (now - lastBackTapTime <= backDoubleTapWindowMs) {
-            rapidDeleteActive = true
-            backspaceHandler.post(rapidDeleteRunnable)
-        } else {
-            performBackspace()
-        }
-        lastBackTapTime = now
     }
 
     private fun handleStarKey(event: KeyEvent) {
@@ -626,7 +726,7 @@ class CursorAccessibilityService : AccessibilityService() {
         super.onDestroy()
         stopMoving()
         clickHandler.removeCallbacksAndMessages(null)
-        backspaceHandler.removeCallbacksAndMessages(null)
+        brightnessHandler.removeCallbacksAndMessages(null)
         if (::prefs.isInitialized) prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
