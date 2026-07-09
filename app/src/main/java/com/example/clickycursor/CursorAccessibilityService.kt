@@ -2,6 +2,7 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -28,7 +29,7 @@ class CursorAccessibilityService : AccessibilityService() {
     private var cursorX = 0f
     private var cursorY = 0f
 
-    private val moveStepPerTick = 7f
+    private var moveStepPerTick = 7f
     private val tickIntervalMs = 12L
 
     private val moveHandler = Handler(Looper.getMainLooper())
@@ -87,9 +88,12 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private val backspaceHandler = Handler(Looper.getMainLooper())
     private var lastBackTapTime = 0L
-    private val backDoubleTapWindowMs = 350L
+    private val backDoubleTapWindowMs = 600L
     private var rapidDeleteActive = false
     private val backspaceRepeatIntervalMs = 140L
+
+    private var lastImeVisibleTime = 0L
+    private val imeGracePeriodMs = 1000L
 
     private val rapidDeleteRunnable = object : Runnable {
         override fun run() {
@@ -143,9 +147,19 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private var pointerPaused = false
 
+    private lateinit var prefs: SharedPreferences
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
+        if (key == MainActivity.KEY_CURSOR_SPEED) {
+            moveStepPerTick = sp.getFloat(MainActivity.KEY_CURSOR_SPEED, MainActivity.DEFAULT_SPEED)
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        prefs = getSharedPreferences(MainActivity.PREFS_NAME, MODE_PRIVATE)
+        moveStepPerTick = prefs.getFloat(MainActivity.KEY_CURSOR_SPEED, MainActivity.DEFAULT_SPEED)
+        prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         setupOverlay()
     }
 
@@ -434,7 +448,7 @@ class CursorAccessibilityService : AccessibilityService() {
                 handleMenuKey(event); true
             }
             KeyEvent.KEYCODE_BACK -> {
-                if (pointerPaused) {
+                if (isTypingContextActive()) {
                     handleBackspaceKey(event)
                     true
                 } else {
@@ -578,11 +592,16 @@ class CursorAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
             val imeVisible = windows?.any { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+            if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
             if (imeVisible != pointerPaused) {
                 pointerPaused = imeVisible
                 cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
             }
         }
+    }
+
+    private fun isTypingContextActive(): Boolean {
+        return pointerPaused || (System.currentTimeMillis() - lastImeVisibleTime < imeGracePeriodMs)
     }
 
     override fun onInterrupt() {}
@@ -608,6 +627,7 @@ class CursorAccessibilityService : AccessibilityService() {
         stopMoving()
         clickHandler.removeCallbacksAndMessages(null)
         backspaceHandler.removeCallbacksAndMessages(null)
+        if (::prefs.isInitialized) prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
         }
