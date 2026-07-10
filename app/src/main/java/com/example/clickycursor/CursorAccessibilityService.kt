@@ -2,6 +2,10 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Path
@@ -22,6 +26,14 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 class CursorAccessibilityService : AccessibilityService() {
+
+    companion object {
+        // Contract with TyrionDictionary's IME: it broadcasts this explicitly (setPackage-targeted)
+        // whenever it starts/stops actively composing text, since it shows no IME window of its
+        // own for us to detect via accessibility window snooping.
+        private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
+        private const val EXTRA_TYPING = "typing"
+    }
 
     private lateinit var windowManager: WindowManager
     private lateinit var cursorView: ImageView
@@ -121,8 +133,6 @@ class CursorAccessibilityService : AccessibilityService() {
     private val screenshotClickTimestamps = mutableListOf<Long>()
     private val tripleClickWindowMs = 600L
 
-    // Reaching the top edge toggles the status bar (once per arrival, not repeated).
-    private var topEdgeActive = false
     private var statusBarExpanded = false
 
     // --- Back key: reverted to delete-while-typing / normal Back otherwise ---
@@ -173,6 +183,16 @@ class CursorAccessibilityService : AccessibilityService() {
     private var screenHeight = 0
 
     private var pointerPaused = false
+    private var externalTypingActive = false
+
+    private val typingStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ACTION_TYPING_STATE) {
+                externalTypingActive = intent.getBooleanExtra(EXTRA_TYPING, false)
+                updatePointerPausedState()
+            }
+        }
+    }
 
     private lateinit var prefs: SharedPreferences
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
@@ -188,6 +208,15 @@ class CursorAccessibilityService : AccessibilityService() {
         moveStepPerTick = prefs.getFloat(MainActivity.KEY_CURSOR_SPEED, MainActivity.DEFAULT_SPEED)
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         setupOverlay()
+
+        val filter = IntentFilter(ACTION_TYPING_STATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Must be EXPORTED (not NOT_EXPORTED): this broadcast comes from a different
+            // app (TyrionDictionary's IME), not from within ClickyCursor itself.
+            registerReceiver(typingStateReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(typingStateReceiver, filter)
+        }
     }
 
     private fun setupOverlay() {
@@ -250,23 +279,22 @@ class CursorAccessibilityService : AccessibilityService() {
         dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
+    /**
+     * All four edges now behave the same way: reaching an edge while moving scrolls
+     * content in that direction (up/down/left/right), repeated on an interval while
+     * the cursor is held against the edge. The top edge no longer auto-toggles the
+     * status bar on arrival — see handleClickKey for that (now a click action instead).
+     */
     private fun checkEdgeScroll() {
-        // Top edge: toggle the status bar once per arrival, not repeatedly while held.
-        if (activeDirY < 0 && cursorY <= 0f) {
-            if (!topEdgeActive) {
-                toggleStatusBar()
-                topEdgeActive = true
-            }
-        } else if (cursorY > 0f) {
-            topEdgeActive = false
-        }
-
         val now = System.currentTimeMillis()
         if (now - lastEdgeScrollTime < edgeScrollIntervalMs) return
 
         var triggered = false
 
-        if (activeDirY > 0 && cursorY >= screenHeight.toFloat()) {
+        if (activeDirY < 0 && cursorY <= 0f) {
+            scrollVertical(scrollDown = false)
+            triggered = true
+        } else if (activeDirY > 0 && cursorY >= screenHeight.toFloat()) {
             scrollVertical(scrollDown = true)
             triggered = true
         }
@@ -615,9 +643,16 @@ class CursorAccessibilityService : AccessibilityService() {
             KeyEvent.ACTION_UP -> {
                 clickHandler.removeCallbacks(longPressRunnable)
                 if (!longPressFired) {
-                    performClickAt(cursorX, cursorY, longClick = false)
-                    showClickFeedback()
-                    registerClickForTripleTapScreenshot()
+                    if (cursorY <= 0f) {
+                        // Cursor pinned at the top edge: clicking here reveals the
+                        // status bar instead of dispatching a tap gesture at y=0.
+                        toggleStatusBar()
+                        showClickFeedback()
+                    } else {
+                        performClickAt(cursorX, cursorY, longClick = false)
+                        showClickFeedback()
+                        registerClickForTripleTapScreenshot()
+                    }
                 }
             }
         }
@@ -676,12 +711,26 @@ class CursorAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
-            val imeVisible = windows?.any { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
-            if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
-            if (imeVisible != pointerPaused) {
-                pointerPaused = imeVisible
-                cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
-            }
+            updatePointerPausedState()
+        }
+    }
+
+    /**
+     * Combines two signals: (1) whether any accessibility window of type
+     * TYPE_INPUT_METHOD is currently on screen (works for the system keyboard,
+     * Gboard, etc.), and (2) the explicit broadcast TyrionDictionary sends on
+     * onStartInputView/onFinishInputView (it shows no IME window of its own,
+     * so signal (1) alone would never see it).
+     */
+    private fun updatePointerPausedState() {
+        val windowBasedTyping = windows?.any {
+            it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+        } == true
+        val imeVisible = windowBasedTyping || externalTypingActive
+        if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
+        if (imeVisible != pointerPaused) {
+            pointerPaused = imeVisible
+            cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
         }
     }
 
@@ -713,6 +762,11 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.removeCallbacksAndMessages(null)
         brightnessHandler.removeCallbacksAndMessages(null)
         if (::prefs.isInitialized) prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        try {
+            unregisterReceiver(typingStateReceiver)
+        } catch (e: Exception) {
+            // Not registered (e.g. onServiceConnected never ran); safe to ignore.
+        }
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
         }
