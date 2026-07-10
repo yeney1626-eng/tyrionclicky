@@ -2,6 +2,10 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Path
@@ -22,6 +26,14 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 class CursorAccessibilityService : AccessibilityService() {
+
+    companion object {
+        // Contract with TyrionDictionary's IME: it broadcasts this explicitly (setPackage-targeted)
+        // whenever it starts/stops actively composing text, so we don't have to guess typing state
+        // purely from accessibility window snooping (which was getting stuck / unreliable).
+        private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
+        private const val EXTRA_TYPING = "typing"
+    }
 
     private lateinit var windowManager: WindowManager
     private lateinit var cursorView: ImageView
@@ -173,6 +185,16 @@ class CursorAccessibilityService : AccessibilityService() {
     private var screenHeight = 0
 
     private var pointerPaused = false
+    private var externalTypingActive = false
+
+    private val typingStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ACTION_TYPING_STATE) {
+                externalTypingActive = intent.getBooleanExtra(EXTRA_TYPING, false)
+                updatePointerPausedState()
+            }
+        }
+    }
 
     private lateinit var prefs: SharedPreferences
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
@@ -188,6 +210,13 @@ class CursorAccessibilityService : AccessibilityService() {
         moveStepPerTick = prefs.getFloat(MainActivity.KEY_CURSOR_SPEED, MainActivity.DEFAULT_SPEED)
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         setupOverlay()
+
+        val filter = IntentFilter(ACTION_TYPING_STATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(typingStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(typingStateReceiver, filter)
+        }
     }
 
     private fun setupOverlay() {
@@ -691,12 +720,28 @@ class CursorAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
-            val imeVisible = windows?.any { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
-            if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
-            if (imeVisible != pointerPaused) {
-                pointerPaused = imeVisible
-                cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
-            }
+            updatePointerPausedState()
+        }
+    }
+
+    /**
+     * Combines two signals: (1) whether any accessibility window of type
+     * TYPE_INPUT_METHOD is currently on screen (works for the system keyboard,
+     * Gboard, etc.), and (2) the explicit broadcast TyrionDictionary sends on
+     * onStartInputView/onFinishInputView. TyrionDictionary intentionally shows
+     * no IME window at all now (to avoid the platform's "first Back dismisses
+     * the keyboard" behavior), so signal (2) is what actually drives this while
+     * using it; signal (1) is kept as a fallback for other keyboards.
+     */
+    private fun updatePointerPausedState() {
+        val windowBasedTyping = windows?.any {
+            it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+        } == true
+        val imeVisible = windowBasedTyping || externalTypingActive
+        if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
+        if (imeVisible != pointerPaused) {
+            pointerPaused = imeVisible
+            cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
         }
     }
 
@@ -728,6 +773,11 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.removeCallbacksAndMessages(null)
         brightnessHandler.removeCallbacksAndMessages(null)
         if (::prefs.isInitialized) prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        try {
+            unregisterReceiver(typingStateReceiver)
+        } catch (e: Exception) {
+            // Not registered (e.g. onServiceConnected never ran); safe to ignore.
+        }
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
         }
