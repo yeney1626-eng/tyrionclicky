@@ -2,10 +2,6 @@ package com.example.clickycursor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Path
@@ -26,14 +22,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 class CursorAccessibilityService : AccessibilityService() {
-
-    companion object {
-        // Contract with TyrionDictionary's IME: it broadcasts this explicitly (setPackage-targeted)
-        // whenever it starts/stops actively composing text, so we don't have to guess typing state
-        // purely from accessibility window snooping (which was getting stuck / unreliable).
-        private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
-        private const val EXTRA_TYPING = "typing"
-    }
 
     private lateinit var windowManager: WindowManager
     private lateinit var cursorView: ImageView
@@ -57,12 +45,12 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private val clickHandler = Handler(Looper.getMainLooper())
 
-    // --- Center/OK key: tap / long-press right-click / auto-click on hold ---
+    // --- Center/OK key: tap = click, hold ~0.4s = right-click. No drag here anymore. ---
     private val longPressThresholdMs = 400L
     private val longPressGestureDurationMs = 700L
     private var longPressFired = false
 
-    private val dragStartDelayMs = 400L
+    // Shared drag machinery (now triggered from the magnifying glass key instead of center key)
     private var dragActive = false
     private var dragLastX = 0f
     private var dragLastY = 0f
@@ -79,7 +67,6 @@ class CursorAccessibilityService : AccessibilityService() {
         longPressFired = true
         performLongPressAt(cursorX, cursorY)
         showClickFeedback()
-        clickHandler.postDelayed(dragStartRunnable, dragStartDelayMs)
     }
 
     private val revertImageRunnable = Runnable {
@@ -94,25 +81,22 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
 
-    // --- Menu key (magnifying glass, keycode 82): tap = delete one char, hold = continuous delete ---
+    // --- Menu key (magnifying glass, keycode 82): press = continuous delete, longer hold = drag ---
     private var menuHeld = false
-    private val menuRepeatDelayMs = 400L
     private val menuRepeatIntervalMs = 140L
+    private val menuDragThresholdMs = 700L
     private val menuRepeatRunnable = object : Runnable {
         override fun run() {
-            if (!menuHeld) return
+            if (!menuHeld || dragActive) return
             performBackspace()
             clickHandler.postDelayed(this, menuRepeatIntervalMs)
         }
-    }
-    private val menuStartRepeatRunnable = Runnable {
-        menuHeld = true
-        clickHandler.post(menuRepeatRunnable)
     }
 
     private val brightnessHandler = Handler(Looper.getMainLooper())
     private var brightnessAdjusting = false
     private var brightnessDecreasing = true
+    private val brightnessHoldThresholdMs = 400L
     private val brightnessStepDelayMs = 90L
     private val brightnessStep = 8
     private val brightnessRunnable = object : Runnable {
@@ -121,6 +105,16 @@ class CursorAccessibilityService : AccessibilityService() {
             adjustBrightness(if (brightnessDecreasing) -brightnessStep else brightnessStep)
             brightnessHandler.postDelayed(this, brightnessStepDelayMs)
         }
+    }
+    private val brightnessDecreaseStartRunnable = Runnable {
+        brightnessDecreasing = true
+        brightnessAdjusting = true
+        brightnessHandler.post(brightnessRunnable)
+    }
+    private val brightnessIncreaseStartRunnable = Runnable {
+        brightnessDecreasing = false
+        brightnessAdjusting = true
+        brightnessHandler.post(brightnessRunnable)
     }
 
     // Triple-tap the center key quickly = screenshot.
@@ -131,13 +125,7 @@ class CursorAccessibilityService : AccessibilityService() {
     private var topEdgeActive = false
     private var statusBarExpanded = false
 
-    // --- Back key: tap = normal Back, hold = Recents ---
-    private var backLongPressFired = false
-    private val backLongPressRunnable = Runnable {
-        backLongPressFired = true
-        performGlobalAction(GLOBAL_ACTION_RECENTS)
-    }
-
+    // --- Back key: reverted to delete-while-typing / normal Back otherwise ---
     private var lastImeVisibleTime = 0L
     private val imeGracePeriodMs = 1000L
 
@@ -185,16 +173,6 @@ class CursorAccessibilityService : AccessibilityService() {
     private var screenHeight = 0
 
     private var pointerPaused = false
-    private var externalTypingActive = false
-
-    private val typingStateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == ACTION_TYPING_STATE) {
-                externalTypingActive = intent.getBooleanExtra(EXTRA_TYPING, false)
-                updatePointerPausedState()
-            }
-        }
-    }
 
     private lateinit var prefs: SharedPreferences
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
@@ -210,13 +188,6 @@ class CursorAccessibilityService : AccessibilityService() {
         moveStepPerTick = prefs.getFloat(MainActivity.KEY_CURSOR_SPEED, MainActivity.DEFAULT_SPEED)
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         setupOverlay()
-
-        val filter = IntentFilter(ACTION_TYPING_STATE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(typingStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(typingStateReceiver, filter)
-        }
     }
 
     private fun setupOverlay() {
@@ -554,21 +525,22 @@ class CursorAccessibilityService : AccessibilityService() {
                 handleMenuKey(event); true
             }
             KeyEvent.KEYCODE_BACK -> {
-                handleBackKey(event); true
+                if (isTypingContextActive()) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        performBackspace()
+                    }
+                    true
+                } else {
+                    super.onKeyEvent(event)
+                }
             }
             KeyEvent.KEYCODE_4 -> {
-                if (isTypingContextActive()) {
-                    super.onKeyEvent(event)
-                } else {
-                    handleBrightnessKey(event, decrease = true); true
-                }
+                handleBrightnessKey(event, decrease = true)
+                super.onKeyEvent(event)
             }
             KeyEvent.KEYCODE_6 -> {
-                if (isTypingContextActive()) {
-                    super.onKeyEvent(event)
-                } else {
-                    handleBrightnessKey(event, decrease = false); true
-                }
+                handleBrightnessKey(event, decrease = false)
+                super.onKeyEvent(event)
             }
             KeyEvent.KEYCODE_STAR -> {
                 handleStarKey(event)
@@ -642,8 +614,6 @@ class CursorAccessibilityService : AccessibilityService() {
             }
             KeyEvent.ACTION_UP -> {
                 clickHandler.removeCallbacks(longPressRunnable)
-                clickHandler.removeCallbacks(dragStartRunnable)
-                dragActive = false
                 if (!longPressFired) {
                     performClickAt(cursorX, cursorY, longClick = false)
                     showClickFeedback()
@@ -657,46 +627,32 @@ class CursorAccessibilityService : AccessibilityService() {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
+                    menuHeld = true
+                    dragActive = false
                     performBackspace()
-                    clickHandler.postDelayed(menuStartRepeatRunnable, menuRepeatDelayMs)
+                    clickHandler.postDelayed(menuRepeatRunnable, menuRepeatIntervalMs)
+                    clickHandler.postDelayed(dragStartRunnable, menuDragThresholdMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
-                clickHandler.removeCallbacks(menuStartRepeatRunnable)
-                clickHandler.removeCallbacks(menuRepeatRunnable)
                 menuHeld = false
-            }
-        }
-    }
-
-    private fun handleBackKey(event: KeyEvent) {
-        when (event.action) {
-            KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount == 0) {
-                    backLongPressFired = false
-                    clickHandler.postDelayed(backLongPressRunnable, longPressThresholdMs)
-                }
-            }
-            KeyEvent.ACTION_UP -> {
-                clickHandler.removeCallbacks(backLongPressRunnable)
-                if (!backLongPressFired) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                }
+                dragActive = false
+                clickHandler.removeCallbacks(menuRepeatRunnable)
+                clickHandler.removeCallbacks(dragStartRunnable)
             }
         }
     }
 
     private fun handleBrightnessKey(event: KeyEvent, decrease: Boolean) {
+        val startRunnable = if (decrease) brightnessDecreaseStartRunnable else brightnessIncreaseStartRunnable
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    brightnessDecreasing = decrease
-                    adjustBrightness(if (decrease) -brightnessStep else brightnessStep)
-                    brightnessAdjusting = true
-                    brightnessHandler.postDelayed(brightnessRunnable, brightnessStepDelayMs)
+                    brightnessHandler.postDelayed(startRunnable, brightnessHoldThresholdMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
+                brightnessHandler.removeCallbacks(startRunnable)
                 brightnessAdjusting = false
                 brightnessHandler.removeCallbacks(brightnessRunnable)
             }
@@ -720,28 +676,12 @@ class CursorAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
-            updatePointerPausedState()
-        }
-    }
-
-    /**
-     * Combines two signals: (1) whether any accessibility window of type
-     * TYPE_INPUT_METHOD is currently on screen (works for the system keyboard,
-     * Gboard, etc.), and (2) the explicit broadcast TyrionDictionary sends on
-     * onStartInputView/onFinishInputView. TyrionDictionary intentionally shows
-     * no IME window at all now (to avoid the platform's "first Back dismisses
-     * the keyboard" behavior), so signal (2) is what actually drives this while
-     * using it; signal (1) is kept as a fallback for other keyboards.
-     */
-    private fun updatePointerPausedState() {
-        val windowBasedTyping = windows?.any {
-            it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
-        } == true
-        val imeVisible = windowBasedTyping || externalTypingActive
-        if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
-        if (imeVisible != pointerPaused) {
-            pointerPaused = imeVisible
-            cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
+            val imeVisible = windows?.any { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+            if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
+            if (imeVisible != pointerPaused) {
+                pointerPaused = imeVisible
+                cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
+            }
         }
     }
 
@@ -773,11 +713,6 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.removeCallbacksAndMessages(null)
         brightnessHandler.removeCallbacksAndMessages(null)
         if (::prefs.isInitialized) prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
-        try {
-            unregisterReceiver(typingStateReceiver)
-        } catch (e: Exception) {
-            // Not registered (e.g. onServiceConnected never ran); safe to ignore.
-        }
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
         }
