@@ -62,19 +62,6 @@ class CursorAccessibilityService : AccessibilityService() {
     private val longPressGestureDurationMs = 700L
     private var longPressFired = false
 
-    // Shared drag machinery (now triggered from the magnifying glass key instead of center key)
-    private var dragActive = false
-    private var dragLastX = 0f
-    private var dragLastY = 0f
-    private var lastDragDispatchTime = 0L
-    private val dragThrottleMs = 60L
-
-    private val dragStartRunnable = Runnable {
-        dragActive = true
-        dragLastX = cursorX
-        dragLastY = cursorY
-    }
-
     private val longPressRunnable = Runnable {
         longPressFired = true
         performLongPressAt(cursorX, cursorY)
@@ -93,16 +80,13 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
 
-    // --- Menu key (magnifying glass, keycode 82): press = continuous delete, longer hold = drag ---
-    private var menuHeld = false
-    private val menuRepeatIntervalMs = 140L
-    private val menuDragThresholdMs = 700L
-    private val menuRepeatRunnable = object : Runnable {
-        override fun run() {
-            if (!menuHeld || dragActive) return
-            performBackspace()
-            clickHandler.postDelayed(this, menuRepeatIntervalMs)
-        }
+    // --- Menu key (magnifying glass, keycode 82): tap = Recents, hold = screenshot ---
+    private var menuLongPressFired = false
+    private val menuScreenshotThresholdMs = 700L
+    private val menuLongPressRunnable = Runnable {
+        menuLongPressFired = true
+        takeScreenshot()
+        showClickFeedback()
     }
 
     private val brightnessHandler = Handler(Looper.getMainLooper())
@@ -129,13 +113,25 @@ class CursorAccessibilityService : AccessibilityService() {
         brightnessHandler.post(brightnessRunnable)
     }
 
-    // Triple-tap the center key quickly = screenshot.
-    private val screenshotClickTimestamps = mutableListOf<Long>()
-    private val tripleClickWindowMs = 600L
-
     private var statusBarExpanded = false
 
-    // --- Back key: reverted to delete-while-typing / normal Back otherwise ---
+    // --- Back key: continuous delete while typing; once there's nothing left to
+    // delete (or if there was nothing to begin with), falls through to a normal
+    // Back action instead of doing nothing. ---
+    private var backHeld = false
+    private val backRepeatIntervalMs = 140L
+    private val backRepeatRunnable = object : Runnable {
+        override fun run() {
+            if (!backHeld) return
+            if (performBackspace()) {
+                clickHandler.postDelayed(this, backRepeatIntervalMs)
+            } else {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                backHeld = false
+            }
+        }
+    }
+
     private var lastImeVisibleTime = 0L
     private val imeGracePeriodMs = 1000L
 
@@ -258,33 +254,8 @@ class CursorAccessibilityService : AccessibilityService() {
         cursorX = (cursorX + dx).coerceIn(0f, screenWidth.toFloat())
         cursorY = (cursorY + dy).coerceIn(0f, screenHeight.toFloat())
         updateOverlayPosition()
-
-        if (dragActive) {
-            val now = System.currentTimeMillis()
-            if (now - lastDragDispatchTime >= dragThrottleMs) {
-                performDragSegment(dragLastX, dragLastY, cursorX, cursorY)
-                dragLastX = cursorX
-                dragLastY = cursorY
-                lastDragDispatchTime = now
-            }
-        }
     }
 
-    private fun performDragSegment(fromX: Float, fromY: Float, toX: Float, toY: Float) {
-        val path = Path().apply {
-            moveTo(fromX, fromY)
-            lineTo(toX, toY)
-        }
-        val stroke = GestureDescription.StrokeDescription(path, 0, dragThrottleMs)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
-    }
-
-    /**
-     * All four edges now behave the same way: reaching an edge while moving scrolls
-     * content in that direction (up/down/left/right), repeated on an interval while
-     * the cursor is held against the edge. The top edge no longer auto-toggles the
-     * status bar on arrival — see handleClickKey for that (now a click action instead).
-     */
     private fun checkEdgeScroll() {
         val now = System.currentTimeMillis()
         if (now - lastEdgeScrollTime < edgeScrollIntervalMs) return
@@ -362,20 +333,6 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun registerClickForTripleTapScreenshot() {
-        val now = System.currentTimeMillis()
-        screenshotClickTimestamps.add(now)
-        while (screenshotClickTimestamps.isNotEmpty() &&
-            now - screenshotClickTimestamps.first() > tripleClickWindowMs
-        ) {
-            screenshotClickTimestamps.removeAt(0)
-        }
-        if (screenshotClickTimestamps.size >= 3) {
-            screenshotClickTimestamps.clear()
-            takeScreenshot()
-        }
-    }
-
     private fun adjustBrightness(delta: Int) {
         if (!Settings.System.canWrite(this)) return
         try {
@@ -402,20 +359,22 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun performBackspace() {
-        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+    private fun performBackspace(): Boolean {
+        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         try {
             val isHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText
-            if (isHint) return
-            val text = node.text?.toString() ?: return
-            if (text.isEmpty()) return
+            if (isHint) return false
+            val text = node.text?.toString() ?: return false
+            if (text.isEmpty()) return false
             val newText = text.substring(0, text.length - 1)
             val arguments = Bundle()
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+            return true
         } catch (e: Exception) {
             // Some fields don't support programmatic edits; fail quietly rather than
             // crashing the service and losing the cursor overlay.
+            return false
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
@@ -554,9 +513,7 @@ class CursorAccessibilityService : AccessibilityService() {
             }
             KeyEvent.KEYCODE_BACK -> {
                 if (isTypingContextActive()) {
-                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                        performBackspace()
-                    }
+                    handleBackKey(event)
                     true
                 } else {
                     super.onKeyEvent(event)
@@ -651,7 +608,6 @@ class CursorAccessibilityService : AccessibilityService() {
                     } else {
                         performClickAt(cursorX, cursorY, longClick = false)
                         showClickFeedback()
-                        registerClickForTripleTapScreenshot()
                     }
                 }
             }
@@ -662,18 +618,36 @@ class CursorAccessibilityService : AccessibilityService() {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    menuHeld = true
-                    dragActive = false
-                    performBackspace()
-                    clickHandler.postDelayed(menuRepeatRunnable, menuRepeatIntervalMs)
-                    clickHandler.postDelayed(dragStartRunnable, menuDragThresholdMs)
+                    menuLongPressFired = false
+                    clickHandler.postDelayed(menuLongPressRunnable, menuScreenshotThresholdMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
-                menuHeld = false
-                dragActive = false
-                clickHandler.removeCallbacks(menuRepeatRunnable)
-                clickHandler.removeCallbacks(dragStartRunnable)
+                clickHandler.removeCallbacks(menuLongPressRunnable)
+                if (!menuLongPressFired) {
+                    performGlobalAction(GLOBAL_ACTION_RECENTS)
+                }
+            }
+        }
+    }
+
+    private fun handleBackKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    backHeld = true
+                    if (performBackspace()) {
+                        clickHandler.postDelayed(backRepeatRunnable, backRepeatIntervalMs)
+                    } else {
+                        // Nothing to delete right now: behave like a normal Back tap.
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        backHeld = false
+                    }
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                backHeld = false
+                clickHandler.removeCallbacks(backRepeatRunnable)
             }
         }
     }
@@ -715,13 +689,6 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * Combines two signals: (1) whether any accessibility window of type
-     * TYPE_INPUT_METHOD is currently on screen (works for the system keyboard,
-     * Gboard, etc.), and (2) the explicit broadcast TyrionDictionary sends on
-     * onStartInputView/onFinishInputView (it shows no IME window of its own,
-     * so signal (1) alone would never see it).
-     */
     private fun updatePointerPausedState() {
         val windowBasedTyping = windows?.any {
             it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
