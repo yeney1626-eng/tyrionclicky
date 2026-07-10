@@ -80,11 +80,21 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
 
-    // --- Menu key (magnifying glass, keycode 82): tap = Recents, hold = screenshot ---
-    private var menuLongPressFired = false
-    private val menuScreenshotThresholdMs = 700L
-    private val menuLongPressRunnable = Runnable {
-        menuLongPressFired = true
+    // --- Menu key (magnifying glass, keycode 82): press = continuous delete, longer hold = screenshot ---
+    private var menuHeld = false
+    private var menuScreenshotFired = false
+    private val menuRepeatIntervalMs = 140L
+    private val menuScreenshotHoldThresholdMs = 700L
+    private val menuRepeatRunnable = object : Runnable {
+        override fun run() {
+            if (!menuHeld || menuScreenshotFired) return
+            performBackspace()
+            clickHandler.postDelayed(this, menuRepeatIntervalMs)
+        }
+    }
+    private val menuScreenshotRunnable = Runnable {
+        menuScreenshotFired = true
+        clickHandler.removeCallbacks(menuRepeatRunnable)
         takeScreenshot()
         showClickFeedback()
     }
@@ -115,20 +125,21 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private var statusBarExpanded = false
 
-    // --- Back key: continuous delete while typing; once there's nothing left to
-    // delete (or if there was nothing to begin with), falls through to a normal
-    // Back action instead of doing nothing. ---
+    // --- Back key: continuous delete while held; only navigates Back once there's
+    //     nothing left to delete. Decided purely by performBackspace()'s return value,
+    //     not by any typing-context guess — much more reliable. ---
     private var backHeld = false
+    private var backDidDeleteThisPress = false
     private val backRepeatIntervalMs = 140L
     private val backRepeatRunnable = object : Runnable {
         override fun run() {
             if (!backHeld) return
             if (performBackspace()) {
+                backDidDeleteThisPress = true
                 clickHandler.postDelayed(this, backRepeatIntervalMs)
-            } else {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                backHeld = false
             }
+            // Nothing left to delete: stop repeating. ACTION_UP decides whether to
+            // navigate Back, based on whether we deleted anything at all this press.
         }
     }
 
@@ -256,6 +267,12 @@ class CursorAccessibilityService : AccessibilityService() {
         updateOverlayPosition()
     }
 
+    /**
+     * All four edges now behave the same way: reaching an edge while moving scrolls
+     * content in that direction (up/down/left/right), repeated on an interval while
+     * the cursor is held against the edge. The top edge no longer auto-toggles the
+     * status bar on arrival — see handleClickKey for that (now a click action instead).
+     */
     private fun checkEdgeScroll() {
         val now = System.currentTimeMillis()
         if (now - lastEdgeScrollTime < edgeScrollIntervalMs) return
@@ -359,8 +376,11 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** Returns true only if a character was actually deleted (i.e. there was a focused,
+     *  editable field with non-empty text). Used by Back to decide delete-vs-navigate. */
     private fun performBackspace(): Boolean {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        var deleted = false
         try {
             val isHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText
             if (isHint) return false
@@ -370,15 +390,15 @@ class CursorAccessibilityService : AccessibilityService() {
             val arguments = Bundle()
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-            return true
+            deleted = true
         } catch (e: Exception) {
             // Some fields don't support programmatic edits; fail quietly rather than
             // crashing the service and losing the cursor overlay.
-            return false
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
         }
+        return deleted
     }
 
     private fun insertTextAtFocus(extra: String) {
@@ -512,12 +532,7 @@ class CursorAccessibilityService : AccessibilityService() {
                 handleMenuKey(event); true
             }
             KeyEvent.KEYCODE_BACK -> {
-                if (isTypingContextActive()) {
-                    handleBackKey(event)
-                    true
-                } else {
-                    super.onKeyEvent(event)
-                }
+                handleBackKey(event)
             }
             KeyEvent.KEYCODE_4 -> {
                 handleBrightnessKey(event, decrease = true)
@@ -614,40 +629,52 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun handleMenuKey(event: KeyEvent) {
-        when (event.action) {
-            KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount == 0) {
-                    menuLongPressFired = false
-                    clickHandler.postDelayed(menuLongPressRunnable, menuScreenshotThresholdMs)
-                }
-            }
-            KeyEvent.ACTION_UP -> {
-                clickHandler.removeCallbacks(menuLongPressRunnable)
-                if (!menuLongPressFired) {
-                    performGlobalAction(GLOBAL_ACTION_RECENTS)
-                }
-            }
-        }
-    }
-
-    private fun handleBackKey(event: KeyEvent) {
+    /**
+     * Continuous delete while held. If nothing was deleted at all during this press
+     * (field was already empty, or nothing focused), navigates Back instead — via
+     * performGlobalAction, not the raw key — once released.
+     *
+     * Always returns true: fully consuming both the down and up events here is what
+     * stops the system's own long-press-Back-for-Recents gesture from ever seeing an
+     * unconsumed key stream to recognize in the first place.
+     */
+    private fun handleBackKey(event: KeyEvent): Boolean {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
                     backHeld = true
-                    if (performBackspace()) {
+                    backDidDeleteThisPress = performBackspace()
+                    if (backDidDeleteThisPress) {
                         clickHandler.postDelayed(backRepeatRunnable, backRepeatIntervalMs)
-                    } else {
-                        // Nothing to delete right now: behave like a normal Back tap.
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        backHeld = false
                     }
                 }
             }
             KeyEvent.ACTION_UP -> {
                 backHeld = false
                 clickHandler.removeCallbacks(backRepeatRunnable)
+                if (!backDidDeleteThisPress) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
+            }
+        }
+        return true
+    }
+
+    private fun handleMenuKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    menuHeld = true
+                    menuScreenshotFired = false
+                    performBackspace()
+                    clickHandler.postDelayed(menuRepeatRunnable, menuRepeatIntervalMs)
+                    clickHandler.postDelayed(menuScreenshotRunnable, menuScreenshotHoldThresholdMs)
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                menuHeld = false
+                clickHandler.removeCallbacks(menuRepeatRunnable)
+                clickHandler.removeCallbacks(menuScreenshotRunnable)
             }
         }
     }
@@ -689,6 +716,13 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Combines two signals: (1) whether any accessibility window of type
+     * TYPE_INPUT_METHOD is currently on screen (works for the system keyboard,
+     * Gboard, etc.), and (2) the explicit broadcast TyrionDictionary sends on
+     * onStartInputView/onFinishInputView (it shows no IME window of its own,
+     * so signal (1) alone would never see it).
+     */
     private fun updatePointerPausedState() {
         val windowBasedTyping = windows?.any {
             it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
@@ -699,10 +733,6 @@ class CursorAccessibilityService : AccessibilityService() {
             pointerPaused = imeVisible
             cursorView.visibility = if (pointerPaused) android.view.View.INVISIBLE else android.view.View.VISIBLE
         }
-    }
-
-    private fun isTypingContextActive(): Boolean {
-        return pointerPaused || (System.currentTimeMillis() - lastImeVisibleTime < imeGracePeriodMs)
     }
 
     override fun onInterrupt() {}
