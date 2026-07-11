@@ -274,8 +274,8 @@ class CursorAccessibilityService : AccessibilityService() {
         val tv = TextView(this).apply {
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF5B2A4D.toInt())
-            textSize = 16f
-            setPadding(28, 14, 28, 14)
+            textSize = 12f
+            setPadding(14, 4, 14, 4)
             visibility = android.view.View.GONE
         }
         statusBadgeParams = WindowManager.LayoutParams(
@@ -287,8 +287,11 @@ class CursorAccessibilityService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 60
+            // Small corner tag instead of top-center — stays clear of whatever's on screen
+            // instead of sitting over the middle of it.
+            gravity = Gravity.TOP or Gravity.END
+            x = 4
+            y = 4
         }
         try {
             windowManager.addView(tv, statusBadgeParams)
