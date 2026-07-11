@@ -33,11 +33,19 @@ class CursorAccessibilityService : AccessibilityService() {
         // own for us to detect via accessibility window snooping.
         private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
         private const val EXTRA_TYPING = "typing"
+        private const val EXTRA_STATUS = "status"
     }
 
     private lateinit var windowManager: WindowManager
     private lateinit var cursorView: ImageView
     private lateinit var params: WindowManager.LayoutParams
+
+    // Small status badge showing TyrionDictionary's current mode (e.g. "Abc • T9").
+    // Uses the exact same overlay mechanism as cursorView (TYPE_ACCESSIBILITY_OVERLAY),
+    // since that's the one confirmed to actually render on this device/firmware —
+    // TyrionDictionary tried three other approaches on its own side and none showed up.
+    private var statusBadgeView: TextView? = null
+    private lateinit var statusBadgeParams: WindowManager.LayoutParams
 
     private var cursorX = 0f
     private var cursorY = 0f
@@ -193,7 +201,9 @@ class CursorAccessibilityService : AccessibilityService() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_TYPING_STATE) {
                 externalTypingActive = intent.getBooleanExtra(EXTRA_TYPING, false)
+                val status = intent.getStringExtra(EXTRA_STATUS) ?: ""
                 updatePointerPausedState()
+                updateStatusBadge(if (externalTypingActive) status else "")
             }
         }
     }
@@ -212,6 +222,7 @@ class CursorAccessibilityService : AccessibilityService() {
         moveStepPerTick = prefs.getFloat(MainActivity.KEY_CURSOR_SPEED, MainActivity.DEFAULT_SPEED)
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         setupOverlay()
+        ensureStatusBadge()
 
         val filter = IntentFilter(ACTION_TYPING_STATE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -256,6 +267,46 @@ class CursorAccessibilityService : AccessibilityService() {
         params.x = (cursorX - halfW).toInt()
         params.y = (cursorY - halfH).toInt()
         windowManager.updateViewLayout(cursorView, params)
+    }
+
+    private fun ensureStatusBadge() {
+        if (statusBadgeView != null) return
+        val tv = TextView(this).apply {
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF5B2A4D.toInt())
+            textSize = 16f
+            setPadding(28, 14, 28, 14)
+            visibility = android.view.View.GONE
+        }
+        statusBadgeParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 60
+        }
+        try {
+            windowManager.addView(tv, statusBadgeParams)
+            statusBadgeView = tv
+        } catch (e: Exception) {
+            // If this ever fails, we just silently don't show a status badge.
+        }
+    }
+
+    private fun updateStatusBadge(text: String) {
+        ensureStatusBadge()
+        val view = statusBadgeView ?: return
+        if (text.isEmpty()) {
+            view.visibility = android.view.View.GONE
+        } else {
+            view.text = text
+            view.visibility = android.view.View.VISIBLE
+        }
     }
 
     private fun moveCursorBy(dx: Float, dy: Float) {
@@ -766,6 +817,13 @@ class CursorAccessibilityService : AccessibilityService() {
         }
         if (::windowManager.isInitialized && ::cursorView.isInitialized) {
             windowManager.removeView(cursorView)
+        }
+        if (::windowManager.isInitialized && statusBadgeView != null) {
+            try {
+                windowManager.removeView(statusBadgeView)
+            } catch (e: Exception) {
+                // Already removed or never attached; safe to ignore.
+            }
         }
         if (emojiPanelOpen && ::emojiPanelView.isInitialized) {
             windowManager.removeView(emojiPanelView)
