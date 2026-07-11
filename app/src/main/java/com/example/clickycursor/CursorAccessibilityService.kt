@@ -80,21 +80,11 @@ class CursorAccessibilityService : AccessibilityService() {
         clickHandler.postDelayed(revertImageRunnable, 180)
     }
 
-    // --- Menu key (magnifying glass, keycode 82): press = continuous delete, longer hold = screenshot ---
-    private var menuHeld = false
-    private var menuScreenshotFired = false
-    private val menuRepeatIntervalMs = 140L
-    private val menuScreenshotHoldThresholdMs = 700L
-    private val menuRepeatRunnable = object : Runnable {
-        override fun run() {
-            if (!menuHeld || menuScreenshotFired) return
-            performBackspace()
-            clickHandler.postDelayed(this, menuRepeatIntervalMs)
-        }
-    }
-    private val menuScreenshotRunnable = Runnable {
-        menuScreenshotFired = true
-        clickHandler.removeCallbacks(menuRepeatRunnable)
+    // --- Menu key (magnifying glass, keycode 82): tap = Recents, hold = screenshot ---
+    private var menuLongPressFired = false
+    private val menuScreenshotThresholdMs = 700L
+    private val menuLongPressRunnable = Runnable {
+        menuLongPressFired = true
         takeScreenshot()
         showClickFeedback()
     }
@@ -125,21 +115,28 @@ class CursorAccessibilityService : AccessibilityService() {
 
     private var statusBarExpanded = false
 
-    // --- Back key: continuous delete while held; only navigates Back once there's
-    //     nothing left to delete. Decided purely by performBackspace()'s return value,
-    //     not by any typing-context guess — much more reliable. ---
+    // --- Back key: continuous word delete while typing; once there's nothing left
+    // to delete, falls through to a normal Back action instead of doing nothing.
+    // The OS sometimes hands a long Back hold off to its own gesture (Recents) by
+    // sending a "canceled" release partway through — we tolerate that and keep our
+    // own delete loop running anyway, capped at 1 minute as a safety net. ---
     private var backHeld = false
-    private var backDidDeleteThisPress = false
-    private val backRepeatIntervalMs = 140L
+    private var backHoldStartTime = 0L
+    private val backMaxHoldMs = 60_000L
+    private val backRepeatIntervalMs = 220L
     private val backRepeatRunnable = object : Runnable {
         override fun run() {
             if (!backHeld) return
-            if (performBackspace()) {
-                backDidDeleteThisPress = true
-                clickHandler.postDelayed(this, backRepeatIntervalMs)
+            if (System.currentTimeMillis() - backHoldStartTime >= backMaxHoldMs) {
+                backHeld = false
+                return
             }
-            // Nothing left to delete: stop repeating. ACTION_UP decides whether to
-            // navigate Back, based on whether we deleted anything at all this press.
+            if (performBackspace()) {
+                clickHandler.postDelayed(this, backRepeatIntervalMs)
+            } else {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                backHeld = false
+            }
         }
     }
 
@@ -376,29 +373,36 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** Returns true only if a character was actually deleted (i.e. there was a focused,
-     *  editable field with non-empty text). Used by Back to decide delete-vs-navigate. */
+    private fun deleteLastWord(text: String): String {
+        var end = text.length
+        // Trim any trailing whitespace first.
+        while (end > 0 && text[end - 1].isWhitespace()) end--
+        // Then walk back through the word itself.
+        var start = end
+        while (start > 0 && !text[start - 1].isWhitespace()) start--
+        return text.substring(0, start)
+    }
+
     private fun performBackspace(): Boolean {
         val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
-        var deleted = false
         try {
             val isHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.isShowingHintText
             if (isHint) return false
             val text = node.text?.toString() ?: return false
             if (text.isEmpty()) return false
-            val newText = text.substring(0, text.length - 1)
+            val newText = deleteLastWord(text)
             val arguments = Bundle()
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
             node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-            deleted = true
+            return true
         } catch (e: Exception) {
             // Some fields don't support programmatic edits; fail quietly rather than
             // crashing the service and losing the cursor overlay.
+            return false
         } finally {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) node.recycle()
         }
-        return deleted
     }
 
     private fun insertTextAtFocus(extra: String) {
@@ -532,7 +536,7 @@ class CursorAccessibilityService : AccessibilityService() {
                 handleMenuKey(event); true
             }
             KeyEvent.KEYCODE_BACK -> {
-                handleBackKey(event)
+                handleBackKey(event); true
             }
             KeyEvent.KEYCODE_4 -> {
                 handleBrightnessKey(event, decrease = true)
@@ -629,52 +633,48 @@ class CursorAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * Continuous delete while held. If nothing was deleted at all during this press
-     * (field was already empty, or nothing focused), navigates Back instead — via
-     * performGlobalAction, not the raw key — once released.
-     *
-     * Always returns true: fully consuming both the down and up events here is what
-     * stops the system's own long-press-Back-for-Recents gesture from ever seeing an
-     * unconsumed key stream to recognize in the first place.
-     */
-    private fun handleBackKey(event: KeyEvent): Boolean {
-        when (event.action) {
-            KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount == 0) {
-                    backHeld = true
-                    backDidDeleteThisPress = performBackspace()
-                    if (backDidDeleteThisPress) {
-                        clickHandler.postDelayed(backRepeatRunnable, backRepeatIntervalMs)
-                    }
-                }
-            }
-            KeyEvent.ACTION_UP -> {
-                backHeld = false
-                clickHandler.removeCallbacks(backRepeatRunnable)
-                if (!backDidDeleteThisPress) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                }
-            }
-        }
-        return true
-    }
-
     private fun handleMenuKey(event: KeyEvent) {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
-                    menuHeld = true
-                    menuScreenshotFired = false
-                    performBackspace()
-                    clickHandler.postDelayed(menuRepeatRunnable, menuRepeatIntervalMs)
-                    clickHandler.postDelayed(menuScreenshotRunnable, menuScreenshotHoldThresholdMs)
+                    menuLongPressFired = false
+                    clickHandler.postDelayed(menuLongPressRunnable, menuScreenshotThresholdMs)
                 }
             }
             KeyEvent.ACTION_UP -> {
-                menuHeld = false
-                clickHandler.removeCallbacks(menuRepeatRunnable)
-                clickHandler.removeCallbacks(menuScreenshotRunnable)
+                clickHandler.removeCallbacks(menuLongPressRunnable)
+                if (!menuLongPressFired) {
+                    performGlobalAction(GLOBAL_ACTION_RECENTS)
+                }
+            }
+        }
+    }
+
+    private fun handleBackKey(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    backHeld = true
+                    backHoldStartTime = System.currentTimeMillis()
+                    if (performBackspace()) {
+                        clickHandler.postDelayed(backRepeatRunnable, backRepeatIntervalMs)
+                    } else {
+                        // Nothing to delete right now: behave like a normal Back tap.
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        backHeld = false
+                    }
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                val elapsed = System.currentTimeMillis() - backHoldStartTime
+                if (event.isCanceled && elapsed < backMaxHoldMs) {
+                    // OS is trying to hand this hold off to its own long-press gesture
+                    // (Recents). Ignore the cancellation and keep deleting — the
+                    // backRepeatRunnable's own cap will stop it after 1 minute regardless.
+                    return
+                }
+                backHeld = false
+                clickHandler.removeCallbacks(backRepeatRunnable)
             }
         }
     }
