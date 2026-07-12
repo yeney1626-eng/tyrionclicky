@@ -709,25 +709,27 @@ class CursorAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        ) {
-            updatePointerPausedState()
-        }
+        // Window-scanning removed — see updatePointerPausedState's note below. This callback
+        // is kept (currently unused) in case a window-based fallback is ever wanted again for
+        // other keyboards, but nothing here drives pointer-pausing anymore.
     }
 
     /**
-     * Combines two signals: (1) whether any accessibility window of type
-     * TYPE_INPUT_METHOD is currently on screen (works for the system keyboard,
-     * Gboard, etc.), and (2) the explicit broadcast TyrionDictionary sends on
-     * onStartInputView/onFinishInputView (it shows no IME window of its own,
-     * so signal (1) alone would never see it).
+     * Whether the pointer should be paused (cursor hidden, D-pad handed over to normal
+     * in-field text navigation) is now driven ENTIRELY by the explicit broadcast
+     * TyrionDictionary sends on onStartInput/onFinishInput and mode changes.
+     *
+     * This used to also OR in a check of whether any accessibility window of type
+     * TYPE_INPUT_METHOD was currently on screen, as a fallback for other keyboards. That
+     * turned out to be the cause of the cursor flickering on/off unpredictably — window
+     * state change events fire for all sorts of unrelated system UI activity, and
+     * re-evaluating that scan on every one of them was noisy and unreliable. Since
+     * TyrionDictionary never shows an IME window at all (by design), that signal was pure
+     * noise for it anyway. Removed entirely rather than patched, since the broadcast is a
+     * definitive, event-driven source of truth with no scanning involved.
      */
     private fun updatePointerPausedState() {
-        val windowBasedTyping = windows?.any {
-            it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
-        } == true
-        val imeVisible = windowBasedTyping || externalTypingActive
+        val imeVisible = externalTypingActive
         if (imeVisible) lastImeVisibleTime = System.currentTimeMillis()
         if (imeVisible != pointerPaused) {
             pointerPaused = imeVisible
